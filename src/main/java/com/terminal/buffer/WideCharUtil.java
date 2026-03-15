@@ -25,7 +25,6 @@ public final class WideCharUtil {
         // CJK Unified Ideographs and common extensions
         if (codepoint >= 0x4E00 && codepoint <= 0x9FFF) return true;   // CJK Unified Ideographs
         if (codepoint >= 0x3400 && codepoint <= 0x4DBF) return true;   // CJK Extension A
-        if (codepoint >= 0x20000 && codepoint <= 0x2A6DF) return true; // CJK Extension B
         if (codepoint >= 0xF900 && codepoint <= 0xFAFF) return true;   // CJK Compatibility Ideographs
 
         // Hangul syllables and Jamo
