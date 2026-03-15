@@ -241,9 +241,13 @@ public class TerminalBuffer {
     /**
      * Pushes an empty line onto the bottom of the screen.
      * The top screen line scrolls into scrollback.
+     * The cursor is reset to the top-left of the new screen.
      */
     public void insertEmptyLineAtBottom() {
         scroll();
+        pendingWrap = false;
+        cursorRow = 0;
+        cursorCol = 0;
     }
 
     /** Clears the screen (all cells reset). Scrollback is preserved. Cursor moves to (0, 0). */
