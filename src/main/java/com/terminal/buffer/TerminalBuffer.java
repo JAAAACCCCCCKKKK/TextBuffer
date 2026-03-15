@@ -28,8 +28,8 @@ import java.util.List;
  */
 public class TerminalBuffer {
 
-    private final int width;
-    private final int height;
+    private int width;
+    private int height;
     private final int scrollbackMaxSize;
 
     private final List<Line> screen;
@@ -335,6 +335,59 @@ public class TerminalBuffer {
     public int getWidth()          { return width; }
     public int getHeight()         { return height; }
     public int getScrollbackSize() { return scrollback.size(); }
+
+    /**
+     * Changes the dimensions of the screen.
+     *
+     * <p><b>Width change</b> — every line (screen and scrollback) is resized:
+     * <ul>
+     *   <li>Wider: new columns on the right are blank.</li>
+     *   <li>Narrower: content is truncated. A {@link Cell.CellType#WIDE_LEAD} at
+     *       the new last column is cleared so no half-wide character is left.</li>
+     * </ul>
+     *
+     * <p><b>Height change</b>:
+     * <ul>
+     *   <li>Taller: blank lines are appended at the bottom.</li>
+     *   <li>Shorter: lines are removed from the bottom.</li>
+     * </ul>
+     *
+     * <p>The cursor is clamped to the new bounds and any pending deferred wrap
+     * is cancelled.
+     *
+     * @throws IllegalArgumentException if either dimension is not positive
+     */
+    public void resize(int newWidth, int newHeight) {
+        if (newWidth  <= 0) throw new IllegalArgumentException("Width must be positive, got: " + newWidth);
+        if (newHeight <= 0) throw new IllegalArgumentException("Height must be positive, got: " + newHeight);
+
+        pendingWrap = false;
+
+        // --- Width ---
+        if (newWidth != width) {
+            List<Line> resizedScrollback = new ArrayList<>(scrollback.size());
+            for (Line line : scrollback) resizedScrollback.add(line.resized(newWidth));
+            scrollback.clear();
+            for (Line line : resizedScrollback) scrollback.addLast(line);
+
+            screen.replaceAll(line -> line.resized(newWidth));
+            width = newWidth;
+        }
+
+        // --- Height: shrink (remove from bottom) ---
+        while (screen.size() > newHeight) {
+            screen.remove(screen.size() - 1);
+        }
+
+        // --- Height: grow (add blank lines at bottom) ---
+        while (screen.size() < newHeight) {
+            screen.add(new Line(width));
+        }
+
+        height = newHeight;
+        cursorRow = clamp(cursorRow, 0, height - 1);
+        cursorCol = clamp(cursorCol, 0, width  - 1);
+    }
 
     private void scroll() {
         Line evicted = screen.remove(0);

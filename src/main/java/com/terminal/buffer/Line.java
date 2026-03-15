@@ -118,6 +118,25 @@ public class Line {
         return sb.toString();
     }
 
+    /**
+     * Returns a new Line of {@code newWidth}, copying as much content as fits.
+     * When shrinking, a {@link Cell.CellType#WIDE_LEAD} stranded at the new last
+     * column (its continuation was cut off) is replaced with a blank cell.
+     */
+    public Line resized(int newWidth) {
+        if (newWidth <= 0) throw new IllegalArgumentException("Width must be positive, got: " + newWidth);
+        Line result = new Line(newWidth);
+        int copyLen = Math.min(this.width, newWidth);
+        for (int i = 0; i < copyLen; i++) {
+            result.cells[i].set(cells[i].getCodepoint(), cells[i].getAttributes(), cells[i].getType());
+        }
+        // A WIDE_LEAD at the new last column has its continuation cut off — clear it.
+        if (newWidth < this.width && result.cells[newWidth - 1].isWideLead()) {
+            result.cells[newWidth - 1].clear();
+        }
+        return result;
+    }
+
     public int getWidth() { return width; }
 
     /**
