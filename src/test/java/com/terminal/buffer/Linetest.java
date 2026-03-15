@@ -160,4 +160,24 @@ class LineTest {
         assertThrows(IndexOutOfBoundsException.class, () -> line.getCell(-1));
         assertThrows(IndexOutOfBoundsException.class, () -> line.getCell(5));
     }
+
+    @Test
+    void getWidth_returnsConstructedWidth() {
+        // getWidth() must return the exact width value passed to the constructor
+        // so that callers can safely iterate over columns without out-of-bounds access.
+        Line line = new Line(7);
+        assertEquals(7, line.getWidth());
+    }
+
+    @Test
+    void setCell_charConvenience_storesNarrowChar() {
+        // setCell(col, char, attrs) is a convenience overload for setNarrowCell.
+        // It must store the character with NORMAL type and the given attributes.
+        Line line = new Line(5);
+        TextAttributes bold = TextAttributes.builder().bold(true).build();
+        line.setCell(1, 'M', bold);
+        assertEquals('M',              line.getCell(1).getCharacter());
+        assertTrue(line.getCell(1).getAttributes().bold());
+        assertEquals(Cell.CellType.NORMAL, line.getCell(1).getType());
+    }
 }

@@ -387,6 +387,16 @@ class TerminalBufferTest {
         }
 
         @Test
+        void insertText_emptyString_doesNothing() {
+            // An empty string has no characters to insert, so cursor position
+            // and screen content must remain unchanged after the call.
+            TerminalBuffer buf = new TerminalBuffer(5, 3, 0);
+            buf.insertText("");
+            assertEquals(0, buf.getCursorCol());
+            assertEquals(0, buf.getCursorRow());
+        }
+
+        @Test
         void insertText_null_doesNothing() {
             // A null argument is treated as a no-op, leaving cursor and screen
             // unchanged.

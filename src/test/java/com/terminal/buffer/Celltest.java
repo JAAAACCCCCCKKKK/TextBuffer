@@ -81,4 +81,60 @@ class CellTest {
         assertEquals(emoji, cell.getCodepoint());
         assertEquals('?',   cell.getCharacter());
     }
+
+    @Test
+    void setCodepoint_updatesCodepointOnly() {
+        // setCodepoint mutates the stored codepoint in place while leaving
+        // attributes and type unchanged.
+        Cell cell = new Cell('A', TextAttributes.DEFAULT, Cell.CellType.WIDE_LEAD);
+        cell.setCodepoint('B');
+        assertEquals('B',                  cell.getCharacter());
+        assertEquals(TextAttributes.DEFAULT, cell.getAttributes());
+        assertEquals(Cell.CellType.WIDE_LEAD, cell.getType());
+    }
+
+    @Test
+    void setAttributes_updatesAttributesOnly() {
+        // setAttributes mutates the stored attributes in place while leaving
+        // codepoint and type unchanged.
+        TextAttributes bold = TextAttributes.builder().bold(true).build();
+        Cell cell = new Cell('X', TextAttributes.DEFAULT);
+        cell.setAttributes(bold);
+        assertEquals('X',  cell.getCharacter());
+        assertTrue(cell.getAttributes().bold());
+        assertEquals(Cell.CellType.NORMAL, cell.getType());
+    }
+
+    @Test
+    void setType_updatesTypeOnly() {
+        // setType mutates the stored cell type in place while leaving
+        // codepoint and attributes unchanged.
+        Cell cell = new Cell('Z', TextAttributes.DEFAULT, Cell.CellType.NORMAL);
+        cell.setType(Cell.CellType.WIDE_CONT);
+        assertEquals('Z',                  cell.getCharacter());
+        assertEquals(TextAttributes.DEFAULT, cell.getAttributes());
+        assertTrue(cell.isWideCont());
+    }
+
+    @Test
+    void set_twoArg_setsCodepointAndAttributesWithNormalType() {
+        // The two-argument set() convenience overload must set codepoint and
+        // attributes while defaulting the cell type to NORMAL.
+        TextAttributes italic = TextAttributes.builder().italic(true).build();
+        Cell cell = new Cell('A', TextAttributes.DEFAULT, Cell.CellType.WIDE_LEAD);
+        cell.set('Q', italic);
+        assertEquals('Q',              cell.getCharacter());
+        assertTrue(cell.getAttributes().italic());
+        assertEquals(Cell.CellType.NORMAL, cell.getType());
+    }
+
+    @Test
+    void toString_containsCodepointAndType() {
+        // toString() is used for debugging; it must include at least the codepoint
+        // value and the cell type so that log output is meaningful.
+        Cell cell = new Cell('A', TextAttributes.DEFAULT, Cell.CellType.NORMAL);
+        String s = cell.toString();
+        assertTrue(s.contains(String.valueOf((int) 'A')));
+        assertTrue(s.contains("NORMAL"));
+    }
 }
