@@ -15,6 +15,11 @@ import java.util.List;
  *       Read-only; capped at {@code scrollbackMaxSize} lines.</li>
  * </ul>
  *
+ * <p>Wide characters (CJK ideographs, emoji) occupy 2 columns. A wide character
+ * is stored as a {@link Cell.CellType#WIDE_LEAD} cell followed immediately by a
+ * {@link Cell.CellType#WIDE_CONT} placeholder. The cursor advances by 2 after
+ * writing a wide character.
+ *
  * <p>Global row addressing used by content-access methods:
  * <pre>
  *   0 .. scrollback.size()-1          → scrollback (oldest first)
@@ -32,18 +37,12 @@ public class TerminalBuffer {
 
     private int cursorRow;
     private int cursorCol;
+    private boolean pendingWrap;
     private TextAttributes currentAttributes;
 
-    /**
-     * Creates a new buffer with the given dimensions.
-     *
-     * @param initialWidth      number of columns (must be positive)
-     * @param initialHeight     number of rows visible on screen (must be positive)
-     * @param scrollbackMaxSize maximum number of scrollback lines retained (0 = disabled)
-     */
     public TerminalBuffer(int initialWidth, int initialHeight, int scrollbackMaxSize) {
-        if (initialWidth <= 0)  throw new IllegalArgumentException("Width must be positive, got: " + initialWidth);
-        if (initialHeight <= 0) throw new IllegalArgumentException("Height must be positive, got: " + initialHeight);
+        if (initialWidth <= 0)     throw new IllegalArgumentException("Width must be positive, got: " + initialWidth);
+        if (initialHeight <= 0)    throw new IllegalArgumentException("Height must be positive, got: " + initialHeight);
         if (scrollbackMaxSize < 0) throw new IllegalArgumentException("Scrollback max size must be >= 0, got: " + scrollbackMaxSize);
 
         this.width = initialWidth;
@@ -58,6 +57,7 @@ public class TerminalBuffer {
         this.scrollback = new ArrayDeque<>();
         this.cursorRow = 0;
         this.cursorCol = 0;
+        this.pendingWrap = false;
         this.currentAttributes = TextAttributes.DEFAULT;
     }
 
@@ -74,55 +74,70 @@ public class TerminalBuffer {
     public int getCursorRow() { return cursorRow; }
     public int getCursorCol() { return cursorCol; }
 
-    /**
-     * Moves the cursor to the given screen position.
-     * Out-of-bounds values are clamped to the nearest valid position.
-     */
+    /** Moves the cursor to the given screen position, clamping to valid bounds. */
     public void setCursorPosition(int col, int row) {
-        cursorRow = clamp(row, height - 1);
-        cursorCol = clamp(col, width - 1);
+        pendingWrap = false;
+        cursorRow = clamp(row, 0, height - 1);
+        cursorCol = clamp(col, 0, width - 1);
     }
 
-    public void moveCursorUp(int n) {
-        cursorRow = clamp(cursorRow - n, height - 1);
-    }
-
-    public void moveCursorDown(int n) {
-        cursorRow = clamp(cursorRow + n, height - 1);
-    }
-
-    public void moveCursorLeft(int n) {
-        cursorCol = clamp(cursorCol - n, width - 1);
-    }
-
-    public void moveCursorRight(int n) {
-        cursorCol = clamp(cursorCol + n, width - 1);
-    }
+    public void moveCursorUp(int n)    { cursorRow = clamp(cursorRow - n, 0, height - 1); }
+    public void moveCursorDown(int n)  { cursorRow = clamp(cursorRow + n, 0, height - 1); }
+    public void moveCursorLeft(int n)  { cursorCol = clamp(cursorCol - n, 0, width - 1); }
+    public void moveCursorRight(int n) { cursorCol = clamp(cursorCol + n, 0, width - 1); }
 
     /**
      * Writes {@code text} starting at the current cursor position, overwriting
-     * existing content. Wraps to subsequent lines when the end of a line is
-     * reached. Scrolls the screen upward if writing past the last line.
+     * existing content. Wraps to subsequent lines at end-of-line.
+     * Scrolls the screen upward if writing past the last line.
+     *
+     * <p>Wide characters advance the cursor by 2 columns. If a wide character
+     * would start at the last column of a line, a space is written there instead
+     * and the wide character is placed at column 0 of the next line.
      */
     public void writeText(String text) {
         if (text == null || text.isEmpty()) return;
 
-        for (int i = 0; i < text.length(); i++) {
-            char ch = text.charAt(i);
+        int i = 0;
+        while (i < text.length()) {
+            int cp    = text.codePointAt(i);
+            i        += Character.charCount(cp);
+            int cpWidth = WideCharUtil.displayWidth(cp);
 
-            screen.get(cursorRow).setCell(cursorCol, ch, currentAttributes);
-            cursorCol++;
-
-            if (cursorCol >= width) {
-                // reached end of line — wrap to next line
+            // Fire deferred wrap from the previous character before writing.
+            if (pendingWrap) {
+                pendingWrap = false;
                 cursorCol = 0;
                 cursorRow++;
-
                 if (cursorRow >= height) {
-                    // past bottom — scroll up and stay on last line
                     scroll();
                     cursorRow = height - 1;
                 }
+            }
+
+            // If a wide char doesn't fit at the end of the line, pad with space and wrap.
+            if (cpWidth == 2 && cursorCol == width - 1) {
+                screen.get(cursorRow).setNarrowCell(cursorCol, Cell.EMPTY_CODEPOINT, currentAttributes);
+                cursorCol = 0;
+                cursorRow++;
+                if (cursorRow >= height) {
+                    scroll();
+                    cursorRow = height - 1;
+                }
+            }
+
+            if (cpWidth == 2) {
+                screen.get(cursorRow).setWideCell(cursorCol, cp, currentAttributes);
+            } else {
+                screen.get(cursorRow).setNarrowCell(cursorCol, cp, currentAttributes);
+            }
+
+            cursorCol += cpWidth;
+
+            if (cursorCol >= width) {
+                // Defer the wrap: fire it when the next character is written.
+                pendingWrap = true;
+                cursorCol = width - 1;
             }
         }
     }
@@ -131,13 +146,27 @@ public class TerminalBuffer {
      * Inserts {@code text} at the current cursor position, shifting existing
      * content to the right. Overflow cascades to subsequent lines.
      * Scrolls the screen when the bottom line overflows.
+     *
+     * <p>Wide characters consume 2 pending slots in the queue. Continuation
+     * cells are carried through the cascade together with their lead cell.
      */
     public void insertText(String text) {
         if (text == null || text.isEmpty()) return;
 
+        // Build the pending queue from the input text.
+        // Wide chars add a WIDE_LEAD cell followed by a WIDE_CONT cell so that
+        // the pair always travels together through the cascade.
         Deque<Cell> pending = new ArrayDeque<>();
-        for (char ch : text.toCharArray()) {
-            pending.addLast(new Cell(ch, currentAttributes));
+        int i = 0;
+        while (i < text.length()) {
+            int cp  = text.codePointAt(i);
+            i      += Character.charCount(cp);
+            if (WideCharUtil.isWide(cp)) {
+                pending.addLast(new Cell(cp,currentAttributes, Cell.CellType.WIDE_LEAD));
+                pending.addLast(new Cell(Cell.EMPTY_CODEPOINT, currentAttributes, Cell.CellType.WIDE_CONT));
+            } else {
+                pending.addLast(new Cell(cp, currentAttributes, Cell.CellType.NORMAL));
+            }
         }
 
         int insertRow = cursorRow;
@@ -153,38 +182,43 @@ public class TerminalBuffer {
             Deque<Cell> overflow = new ArrayDeque<>();
             for (int col = width - toWrite; col < width; col++) {
                 Cell src = line.getCell(col);
-                overflow.addLast(new Cell(src.getCharacter(), src.getAttributes()));
+                overflow.addLast(new Cell(src.getCodepoint(), src.getAttributes(), src.getType()));
             }
 
             // Shift existing content right by toWrite positions to make room.
             for (int col = width - 1; col >= insertCol + toWrite; col--) {
                 Cell src = line.getCell(col - toWrite);
-                line.setCell(col, src.getCharacter(), src.getAttributes());
+                line.getCell(col).set(src.getCodepoint(), src.getAttributes(), src.getType());
             }
 
-            // Write pending characters into the freed slots.
+            // Write pending cells into the freed slots.
             for (int col = insertCol; col < insertCol + toWrite; col++) {
                 Cell c = pending.pollFirst();
-                line.setCell(col, c.getCharacter(), c.getAttributes());
+                line.getCell(col).set(c.getCodepoint(), c.getAttributes(), c.getType());
             }
 
             insertCol += toWrite;
 
-            if (insertCol >= width) {
-                // Prepend overflow to pending so displaced cells lead on the next line.
-                Cell[] overflowArr = overflow.toArray(new Cell[0]);
-                for (int i = overflowArr.length - 1; i >= 0; i--) {
-                    pending.addFirst(overflowArr[i]);
-                }
+            boolean overflowHasContent = overflow.stream()
+                    .anyMatch(c -> c.getCodepoint() != Cell.EMPTY_CODEPOINT);
 
-                insertCol = 0;
-                insertRow++;
-                if (insertRow >= height) {
-                    scroll();
-                    insertRow = height - 1;
-                }
-            } else {
-                break; // everything fit on this line
+            // Stop if pending is exhausted and nothing meaningful was displaced.
+            if (insertCol < width && !overflowHasContent) {
+                break;
+            }
+
+            // Cascade to the next row (pending still has items, or overflow has content).
+            insertCol = 0;
+            insertRow++;
+            if (insertRow >= height) {
+                if (overflowHasContent) scroll();
+                insertRow = height - 1;
+                break;
+            }
+            // Prepend overflow so displaced cells lead on the next line.
+            Cell[] overflowArr = overflow.toArray(new Cell[0]);
+            for (int j = overflowArr.length - 1; j >= 0; j--) {
+                pending.addFirst(overflowArr[j]);
             }
         }
 
@@ -229,12 +263,21 @@ public class TerminalBuffer {
 
     /**
      * Returns the character at the given global row and column.
-     * Returns {@code ' '} (space) for empty cells.
+     * For supplementary-plane codepoints use {@link #getCodepointAt} instead.
      *
      * @throws IndexOutOfBoundsException if the position is outside the buffer
      */
     public char getCharAt(int globalRow, int col) {
         return resolveGlobalRow(globalRow).getCell(col).getCharacter();
+    }
+
+    /**
+     * Returns the Unicode codepoint at the given global row and column.
+     *
+     * @throws IndexOutOfBoundsException if the position is outside the buffer
+     */
+    public int getCodepointAt(int globalRow, int col) {
+        return resolveGlobalRow(globalRow).getCell(col).getCodepoint();
     }
 
     /**
@@ -247,7 +290,8 @@ public class TerminalBuffer {
     }
 
     /**
-     * Returns the content of a single line as a plain string (trailing spaces included).
+     * Returns the content of a single line as a plain string.
+     * Wide-character continuation cells are skipped.
      *
      * @throws IndexOutOfBoundsException if {@code globalRow} is out of range
      */
@@ -276,48 +320,34 @@ public class TerminalBuffer {
             sb.append(line.toContentString());
             first = false;
         }
-
         for (int i = 0; i < height; i++) {
             if (!first) sb.append('\n');
             sb.append(screen.get(i).toContentString());
             first = false;
         }
-
         return sb.toString();
     }
 
-    public int getWidth()  { return width; }
-    public int getHeight() { return height; }
+    public int getWidth()          { return width; }
+    public int getHeight()         { return height; }
     public int getScrollbackSize() { return scrollback.size(); }
 
-    /**
-     * Scrolls the screen up by one line:
-     * moves screen[0] into scrollback and appends a fresh empty line at the bottom.
-     */
     private void scroll() {
         Line evicted = screen.remove(0);
 
         if (scrollbackMaxSize > 0) {
-            // Deep-copy before storing so future screen edits don't corrupt history.
             scrollback.addLast(new Line(evicted));
             if (scrollback.size() > scrollbackMaxSize) {
                 scrollback.removeFirst();
             }
         }
-        // Reuse the evicted line object (cleared) as the new bottom line.
+
         evicted.clear();
         screen.add(evicted);
     }
 
-    /**
-     * Maps a global row index to the corresponding {@link Line}.
-     * Global rows 0...scrollback.size()-1 address scrollback (oldest first);
-     * the remainder address the screen.
-     *
-     * @throws IndexOutOfBoundsException if globalRow is out of range
-     */
     private Line resolveGlobalRow(int globalRow) {
-        int sbSize = scrollback.size();
+        int sbSize    = scrollback.size();
         int totalRows = sbSize + height;
 
         if (globalRow < 0 || globalRow >= totalRows) {
@@ -326,7 +356,6 @@ public class TerminalBuffer {
         }
 
         if (globalRow < sbSize) {
-            // Walk the deque — ArrayDeque does not support random access.
             int idx = 0;
             for (Line line : scrollback) {
                 if (idx == globalRow) return line;
@@ -337,14 +366,7 @@ public class TerminalBuffer {
         return screen.get(globalRow - sbSize);
     }
 
-    private void checkScreenRowBounds(int screenRow) {
-        if (screenRow < 0 || screenRow >= height) {
-            throw new IndexOutOfBoundsException(
-                    "Screen row " + screenRow + " is out of range [0, " + height + ")");
-        }
-    }
-
-    private static int clamp(int value, int max) {
-        return Math.max(0, Math.min(max, value));
+    private static int clamp(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
     }
 }
