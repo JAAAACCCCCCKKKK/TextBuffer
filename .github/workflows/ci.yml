@@ -25,6 +25,35 @@ jobs:
       - name: Run tests with coverage
         run: ./gradlew test jacocoTestReport
 
+      - name: Print coverage summary
+        run: |
+          python3 - <<'EOF'
+          import xml.etree.ElementTree as ET
+
+          tree = ET.parse('build/reports/jacoco/test/jacocoTestReport.xml')
+          root = tree.getroot()
+
+          order = ['INSTRUCTION', 'BRANCH', 'LINE', 'METHOD', 'CLASS']
+          counters = {c.get('type'): c for c in root.findall('counter')}
+
+          print()
+          print('Coverage Report')
+          print('─' * 44)
+          print(f'{"Type":<15} {"Covered":>7} {"Total":>7} {"Coverage":>10}')
+          print('─' * 44)
+          for t in order:
+              if t not in counters:
+                  continue
+              c = counters[t]
+              missed  = int(c.get('missed'))
+              covered = int(c.get('covered'))
+              total   = missed + covered
+              pct     = covered / total * 100 if total else 0
+              print(f'{t:<15} {covered:>7} {total:>7} {pct:>9.1f}%')
+          print('─' * 44)
+          print()
+          EOF
+
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         with:
